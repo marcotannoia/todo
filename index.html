@@ -2,174 +2,90 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
-  <title>Serverless TODO</title>
-  <style>
-    body { font-family: sans-serif; max-width: 600px; margin: 20px auto; }
-    input { padding: 5px; }
-    button { padding: 5px 10px; margin-left: 5px; }
-    li { margin: 5px 0; }
-    .done { text-decoration: line-through; color: gray; }
-    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="topbar">
-    <h1>TODO Serverless</h1>
-    <div>
-      <span id="userInfo"></span>
-      <button id="loginBtn" onclick="login()">Login</button>
-      <button id="logoutBtn" onclick="logout()" style="display:none;">Logout</button>
+  <div class="bg-gradient"></div>
+
+  <div class="page">
+    <header class="nav">
+
+    </header>
+
+<main class="main-center">
+  <!-- HERO CENTRALE -->
+  <section class="hero card fade-in">
+    <div class="hero-orb orb-1"></div>
+    <div class="hero-orb orb-2"></div>
+    <div class="hero-orb orb-3"></div>
+
+    <p class="hero-badge">by Tannoia Marco</p>
+    <h1 class="hero-title">ToDO</h1>
+    <p class="hero-subtitle">your goals, in the net</p>
+    <p class="hero-text">
+      Track your tasks with ToDO.
+    </p>
+
+    <div class="hero-actions">
+      <button id="getStartedBtn" class="btn btn-primary">
+        Get started
+      </button>
+      <span class="hero-hint">
+        Login sotto per vedere le tue TODO personali. 
+      </span>
     </div>
-  </div>
+  </section>
 
-  <div id="app" style="display:none;">
-    <div>
-      <input id="newTodo" placeholder="Nuovo task" />
-      <button onclick="addTodo()">Aggiungi</button>
+  <!-- CARD LOGIN / STATO UTENTE -->
+  <section id="authSection" class="card auth-card fade-in-delayed">
+    <h2 class="section-title">LOGIN TO VIEW, ADD AND EDIT YOUR ToDOs</h2>
+
+    <div class="auth-row">
+      <span id="userInfo" class="user-info"></span>
+      <div class="auth-buttons">
+        <button id="loginBtn" class="btn btn-outline">Login</button>
+        <button id="logoutBtn" class="btn btn-primary" style="display:none;">
+          Logout
+        </button>
+      </div>
     </div>
 
-    <ul id="todoList"></ul>
+    <div class="auth-extra">
+      <p>Una volta loggato troverai le tue task qui sotto.</p>
+    </div>
+  </section>
+
+  <!-- APP TODO (VISIBILE SOLO DA LOGGATO) -->
+  <section id="app" class="card app-card fade-in-delayed-2" style="display:none;">
+    <div class="app-header">
+      <h2 class="section-title">Le tue TODO</h2>
+      <p class="small-text">
+        Tutto salvato in DynamoDB tramite la tua API serverless.
+      </p>
+    </div>
+
+    <div class="input-row">
+      <div class="input-wrapper">
+        <input id="newTodo" placeholder="Nuovo task..." />
+      </div>
+      <button id="addTodoBtn" class="btn btn-primary" type="button">
+        Aggiungi
+      </button>
+    </div>
+
+    <div id="messageBox" class="message-box"></div>
+
+    <ul id="todoList" class="todo-list"></ul>
+  </section>
+</main>
+
+
+    <footer class="footer fade-in-delayed-2">
+      <p>Built on AWS · Cognito · API Gateway · Lambda · DynamoDB</p>
+    </footer>
   </div>
 
-  <div id="notLogged" style="display:none;">
-    <p>Devi fare login per vedere le tue TODO.</p>
-  </div>
-
-  <script>
-    // CONFIG
-    const COGNITO_DOMAIN = "https://eu-south-1dr1kvjflg.auth.eu-south-1.amazoncognito.com";
-    const CLIENT_ID = "58vj61fh7onefg96ptbuboq2r4";
-    const REDIRECT_URI = encodeURIComponent("https://todo-frontend-marco.s3.eu-south-1.amazonaws.com/index.html");
-    const API_BASE = "https://xb9cc6y9x0.execute-api.eu-south-1.amazonaws.com";
-
-    const LOGIN_URL = `${COGNITO_DOMAIN}/login?client_id=${CLIENT_ID}&response_type=token&scope=openid+email&redirect_uri=${REDIRECT_URI}`;
-    const LOGOUT_URL = `${COGNITO_DOMAIN}/logout?client_id=${CLIENT_ID}&logout_uri=${REDIRECT_URI}`;
-
-    function parseHashForToken() {
-      const hash = window.location.hash.substring(1);
-      if (!hash) return;
-      const params = new URLSearchParams(hash);
-      const idToken = params.get("id_token");
-      if (idToken) {
-        sessionStorage.setItem("idToken", idToken);
-      }
-      history.replaceState(null, "", window.location.pathname);
-    }
-
-    function getIdToken() {
-      return sessionStorage.getItem("idToken");
-    }
-
-    function isLoggedIn() {
-      return !!getIdToken();
-    }
-
-    function login() {
-      window.location.href = LOGIN_URL;
-    }
-
-    function logout() {
-      sessionStorage.removeItem("idToken");
-      window.location.href = LOGOUT_URL;
-    }
-
-    async function apiFetch(path, options = {}) {
-      const token = getIdToken();
-      if (!token) throw new Error("No token");
-      const headers = options.headers || {};
-      headers["Authorization"] = token;
-      options.headers = headers;
-      const res = await fetch(API_BASE + path, options);
-      if (res.status === 401) {
-        logout();
-        return;
-      }
-      if (res.status === 204) return null;
-      return res.json();
-    }
-
-    async function loadTodos() {
-      try {
-        const todos = await apiFetch("/todos");
-        const list = document.getElementById("todoList");
-        list.innerHTML = "";
-        todos.forEach(t => {
-          const li = document.createElement("li");
-          li.className = t.done ? "done" : "";
-          li.textContent = t.title + " ";
-
-          const toggle = document.createElement("button");
-          toggle.textContent = t.done ? "Annulla" : "Completata";
-          toggle.onclick = () => toggleDone(t);
-
-          const del = document.createElement("button");
-          del.textContent = "X";
-          del.onclick = () => deleteTodo(t);
-
-          li.appendChild(toggle);
-          li.appendChild(del);
-          list.appendChild(li);
-        });
-      } catch (e) {
-        console.error(e);
-      }
-    }
-
-    async function addTodo() {
-      const input = document.getElementById("newTodo");
-      const title = input.value.trim();
-      if (!title) return;
-      await apiFetch("/todos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title })
-      });
-      input.value = "";
-      loadTodos();
-    }
-
-    async function toggleDone(todo) {
-      await apiFetch("/todos/" + todo.id, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ done: !todo.done })
-      });
-      loadTodos();
-    }
-
-    async function deleteTodo(todo) {
-      await apiFetch("/todos/" + todo.id, {
-        method: "DELETE"
-      });
-      loadTodos();
-    }
-
-    function updateUI() {
-      const logged = isLoggedIn();
-      const app = document.getElementById("app");
-      const notLogged = document.getElementById("notLogged");
-      const loginBtn = document.getElementById("loginBtn");
-      const logoutBtn = document.getElementById("logoutBtn");
-      const userInfo = document.getElementById("userInfo");
-
-      if (logged) {
-        app.style.display = "block";
-        notLogged.style.display = "none";
-        loginBtn.style.display = "none";
-        logoutBtn.style.display = "inline-block";
-        userInfo.textContent = "Logged in";
-        loadTodos();
-      } else {
-        app.style.display = "none";
-        notLogged.style.display = "block";
-        loginBtn.style.display = "inline-block";
-        logoutBtn.style.display = "none";
-        userInfo.textContent = "";
-      }
-    }
-
-    parseHashForToken();
-    updateUI();
-  </script>
+  <script src="app.js" defer></script>
 </body>
 </html>

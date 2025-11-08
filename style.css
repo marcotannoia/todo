@@ -657,4 +657,26 @@ body {
 .message-box.success {
   color: #bbf7d0;
 }
+/* FIX VISIBILITÀ LISTA TODO */
+#app {
+  display: block;           /* quando loggato, il JS può anche rimetterlo a block */
+}
+
+#todoList {
+  display: block !important;
+  list-style: none;
+  margin-top: 12px;
+  padding: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+#todoList li {
+  display: block;
+  color: #ffffff;
+  border: 1px solid #ffffff;
+  margin: 8px 0;
+  padding: 4px 8px;
+  opacity: 1;
+}
 

@@ -10,6 +10,35 @@ const LOGIN_URL = `${COGNITO_DOMAIN}/login?client_id=${CLIENT_ID}&response_type=
 const LOGOUT_URL = `${COGNITO_DOMAIN}/logout?client_id=${CLIENT_ID}&logout_uri=${REDIRECT_URI}`;
 
 // ========== AUTH ==========
+function showOverlay(todos) {
+  let box = document.getElementById("todosOverlay");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "todosOverlay";
+    Object.assign(box.style, {
+      position: "fixed",
+      left: "10px",
+      bottom: "10px",
+      right: "10px",
+      maxHeight: "40vh",
+      overflow: "auto",
+      background: "rgba(0,0,0,0.85)",
+      color: "#fff",
+      border: "2px solid #fff",
+      borderRadius: "10px",
+      padding: "10px",
+      zIndex: "9999",
+      fontSize: "12px"
+    });
+    document.body.appendChild(box);
+  }
+  box.innerHTML = `<div style="font-weight:700;margin-bottom:6px">
+    TODOS (${todos.length}) – debug
+  </div>` + todos.map(t => {
+    const title = t.title ?? t.text ?? t.name ?? t.Task ?? t.todo ?? t.TITLE ?? JSON.stringify(t);
+    return `<div style="border:1px solid #777;border-radius:8px;padding:6px;margin:6px 0">${title}</div>`;
+  }).join("");
+}
 
 function parseHashForToken() {
   const hash = window.location.hash.substring(1);
@@ -89,38 +118,50 @@ async function apiFetch(path, options = {}) {
 // ========== TODO LOGIC ==========
 async function loadTodos() {
   try {
-    const todos = await apiFetch("/todos");
-    console.log("Todos ricevuti (grezzi):", todos);
+    const raw = await apiFetch("/todos");
+    console.log("RAW /todos:", raw);
 
-    if (!Array.isArray(todos)) {
-      console.error("La risposta /todos non è un array:", todos);
-      return;
-    }
+    const todos = normalizeTodos(raw);
+    console.log("Todos normalizzati -> len:", Array.isArray(todos) ? todos.length : "no-array");
 
-    const list = document.getElementById("todoList");
-    if (!list) {
-      console.error("todoList non trovato nell'HTML");
-      return;
-    }
-
-    // Svuota prima
-    list.innerHTML = "";
-
-    todos.forEach((t, i) => {
-      const li = document.createElement("li");
-      li.textContent = t.title || "(senza titolo)";
-      li.style.color = "white";        // per essere sicuro che si vedano
-      li.style.margin = "8px 0";
-      li.style.border = "1px solid white";
-      li.style.padding = "4px 8px";
-      list.appendChild(li);
-    });
-
-    console.log("Renderizzati", todos.length, "todo(s)");
-  } catch (err) {
-    console.error("Errore in loadTodos:", err);
+    renderTodos(todos);
+    setMessage(`Renderizzate ${todos.length} task`, "success");
+  } catch (e) {
+    console.error("Errore in loadTodos:", e);
+    setMessage("Errore caricando le task.", "error");
   }
 }
+function renderTodos(todos) {
+  let list = document.getElementById("todoList");
+  if (!list) {
+    const appCard = document.getElementById("app");
+    list = document.createElement("ul");
+    list.id = "todoList";
+    appCard?.appendChild(list);
+  }
+
+  Object.assign(list.style, {
+    display: "block",
+    position: "relative",
+    zIndex: "50",
+    marginTop: "12px",
+    padding: "0",
+    listStyle: "none"
+  });
+
+  list.innerHTML = todos.map(t => {
+    const title = t.title ?? t.text ?? t.name ?? t.Task ?? t.todo ?? t.TITLE ?? JSON.stringify(t);
+    return `<li style="display:block;color:#fff;border:2px solid #fff;background:rgba(0,0,0,0.35);margin:8px 0;padding:8px 10px;border-radius:10px">
+      ${String(title)}
+    </li>`;
+  }).join("");
+
+  // overlay di sicurezza (così le vedi comunque)
+  showOverlay(todos);
+
+  console.log("POST-RENDER li count:", list.querySelectorAll("li").length);
+}
+
 
 
 
@@ -194,31 +235,32 @@ function setMessage(text, type = "") {
 function updateUI() {
   const logged = isLoggedIn();
   const app = document.getElementById("app");
-  const notLogged = document.getElementById("notLogged");
+  const authSection = document.getElementById("authSection");   // <-- usa l'id giusto
   const loginBtn = document.getElementById("loginBtn");
   const logoutBtn = document.getElementById("logoutBtn");
   const userInfo = document.getElementById("userInfo");
 
-  if (!app || !notLogged || !loginBtn || !logoutBtn || !userInfo) {
+  if (!app || !authSection || !loginBtn || !logoutBtn || !userInfo) {
     console.warn("Qualche elemento UI manca");
     return;
   }
 
   if (logged) {
-    app.style.display = "block";
-    notLogged.style.display = "block";
+    app.style.display = "block";          // mostra la sezione TODO
+    authSection.style.display = "block";  // card login visibile
     loginBtn.style.display = "none";
     logoutBtn.style.display = "inline-block";
     userInfo.textContent = "Sei loggato";
-    loadTodos();
+    loadTodos();                          // carica e renderizza le task
   } else {
     app.style.display = "none";
-    notLogged.style.display = "block";
+    authSection.style.display = "block";
     loginBtn.style.display = "inline-block";
     logoutBtn.style.display = "none";
     userInfo.textContent = "";
   }
 }
+
 
 // ========== INIT ==========
 
@@ -252,3 +294,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+function getTodoId(t) {
+  return t.id ?? t.todoId ?? t.pk ?? t.ID ?? t.pk_id ?? t.uuid;
+}
+
