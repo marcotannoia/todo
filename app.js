@@ -283,7 +283,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const loginBtn = document.getElementById("loginBtn");
   const logoutBtn = document.getElementById("logoutBtn");
 
-  if (getStartedBtn) getStartedBtn.addEventListener("click", scrollToAuth);
+  if (getStartedBtn) getStartedBtn.addEventListener("click", login);
   if (addTodoBtn) addTodoBtn.addEventListener("click", addTodo);
   if (loginBtn) loginBtn.addEventListener("click", login);
   if (logoutBtn) logoutBtn.addEventListener("click", logout);
