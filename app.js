@@ -6,10 +6,227 @@ const REDIRECT_URI = encodeURIComponent(
 );
 const API_BASE = "https://xb9cc6y9x0.execute-api.eu-south-1.amazonaws.com/primo";
 
-const LOGIN_URL = `${COGNITO_DOMAIN}/login?client_id=${CLIENT_ID}&response_type=token&scope=openid+email&redirect_uri=${REDIRECT_URI}`;
+// richiesta sia access_token che id_token
+const LOGIN_URL = `${COGNITO_DOMAIN}/login?client_id=${CLIENT_ID}&response_type=token+id_token&scope=openid+email&redirect_uri=${REDIRECT_URI}`;
 const LOGOUT_URL = `${COGNITO_DOMAIN}/logout?client_id=${CLIENT_ID}&logout_uri=${REDIRECT_URI}`;
 
-// ========== AUTH ==========
+// ================= HELPERS DI NORMALIZZAZIONE E DEBUG =================
+
+// normalizza un singolo item DynamoDB (S, N, BOOL, M, L) -> oggetto JS semplice
+function normalizeDynamoItem(item) {
+  const out = {};
+  for (const key in item) {
+    const val = item[key];
+    if (val === null || val === undefined) {
+      out[key] = val;
+      continue;
+    }
+    if (typeof val !== "object") {
+      out[key] = val;
+      continue;
+    }
+
+    if ("S" in val) out[key] = val.S;
+    else if ("N" in val) out[key] = Number(val.N);
+    else if ("BOOL" in val) out[key] = !!val.BOOL;
+    else if ("M" in val) out[key] = normalizeDynamoItem(val.M);
+    else if ("L" in val) {
+      out[key] = val.L.map(v => {
+        if (v === null || v === undefined) return v;
+        if ("S" in v) return v.S;
+        if ("N" in v) return Number(v.N);
+        if ("BOOL" in v) return !!v.BOOL;
+        if ("M" in v) return normalizeDynamoItem(v.M);
+        if ("L" in v) return (v.L || []).map(x => (x.S ? x.S : x));
+        return v;
+      });
+    } else {
+      // fallback: copia l'oggetto così com'è
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+// normalizza possibili formati di risposta in un array di todo semplici
+function normalizeTodos(raw) {
+  if (!raw) return [];
+
+  // se già è array semplice
+  if (Array.isArray(raw)) {
+    // controlla se è array di item DynamoDB (oggetti con S/N)
+    if (raw.length > 0 && typeof raw[0] === "object" && raw[0] !== null) {
+      const first = raw[0];
+      // se il primo elemento contiene almeno un valore che è oggetto con S/N/BOOL
+      if (Object.values(first).some(v => typeof v === "object")) {
+        return raw.map(i => (typeof i === "object" ? normalizeDynamoItem(i) : i));
+      }
+    }
+    return raw;
+  }
+
+  // formato tipico API Gateway -> { Items: [...] }
+  if (raw.Items && Array.isArray(raw.Items)) {
+    return raw.Items.map(i => (typeof i === "object" ? normalizeDynamoItem(i) : i));
+  }
+
+  // singolo Item
+  if (raw.Item) {
+    return [normalizeDynamoItem(raw.Item)];
+  }
+
+  // se raw.body è una stringa JSON
+  if (raw.body && typeof raw.body === "string") {
+    try {
+      const parsed = JSON.parse(raw.body);
+      return normalizeTodos(parsed);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // se raw è stringa JSON intera
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return normalizeTodos(parsed);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // prova a estrarre da campi comuni
+  const possibleArrays = ["todos", "data", "items", "body"];
+  for (const k of possibleArrays) {
+    if (raw[k] && Array.isArray(raw[k])) return raw[k];
+  }
+
+  // fallback: se è un oggetto semplice cerca di trasformare le proprietà in array
+  return [raw];
+}
+
+// semplici debug helper
+function dbg(...args) {
+  try { console.log(...args); } catch (e) {}
+}
+
+// ================= TOKEN, AUTH =================
+
+function parseHashForToken() {
+  const hash = window.location.hash.substring(1);
+  if (!hash) return;
+  dbg("Hash presente:", hash);
+  const params = new URLSearchParams(hash);
+  const idToken = params.get("id_token");
+  const accessToken = params.get("access_token");
+  const expiresIn = params.get("expires_in");
+
+  if (idToken) {
+    sessionStorage.setItem("idToken", idToken);
+    dbg("Salvato id_token");
+  }
+  if (accessToken) {
+    sessionStorage.setItem("accessToken", accessToken);
+    dbg("Salvato access_token");
+  }
+  if (expiresIn) {
+    const exp = Date.now() + Number(expiresIn) * 1000;
+    sessionStorage.setItem("tokenExpiry", String(exp));
+    dbg("Impostata scadenza token:", new Date(exp).toISOString());
+  }
+
+  // pulisco la hash dall'URL senza ricaricare la pagina
+  history.replaceState(null, "", window.location.pathname);
+}
+
+function getIdToken() {
+  // preferisco id_token (per authorizer Cognito), altrimenti access_token
+  return sessionStorage.getItem("idToken") || sessionStorage.getItem("accessToken") || null;
+}
+
+function isTokenExpired() {
+  const exp = Number(sessionStorage.getItem("tokenExpiry") || "0");
+  if (!exp) return false;
+  return Date.now() > exp;
+}
+
+function isLoggedIn() {
+  const token = getIdToken();
+  if (!token) return false;
+  if (isTokenExpired()) {
+    dbg("Token scaduto, faccio logout");
+    logout();
+    return false;
+  }
+  return true;
+}
+
+function login() {
+  window.location.href = LOGIN_URL;
+}
+
+function logout() {
+  sessionStorage.removeItem("idToken");
+  sessionStorage.removeItem("accessToken");
+  sessionStorage.removeItem("tokenExpiry");
+  window.location.href = LOGOUT_URL;
+}
+
+// ================= API HELPERS =================
+
+async function apiFetch(path, options = {}) {
+  const token = getIdToken();
+  if (!token) throw new Error("No token");
+
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {})
+  };
+  headers["Authorization"] = `Bearer ${token}`;
+  options.headers = headers;
+
+  dbg("API fetch:", API_BASE + path, options);
+
+  const res = await fetch(API_BASE + path, options);
+
+  if (res.status === 401) {
+    console.error("401 dalla API, faccio logout");
+    logout();
+    throw new Error("Unauthorized");
+  }
+
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      // potrebbe essere che l'API risponde con oggetto { statusCode, body: "..." }
+      // gestiremo più sotto
+      console.error("Risposta non JSON diretta:", text);
+      // ma proviamo a restituire il testo grezzo così lo vedrai nei log
+      throw new Error("Risposta non valida JSON: " + text);
+    }
+  }
+
+  // Qui data è { statusCode, body: "..." } oppure il body puro
+  if (data && typeof data === "object" && "body" in data) {
+    // spesso body è una stringa JSON
+    try {
+      const parsedBody = JSON.parse(data.body);
+      dbg("API returned wrapper {body}, parsed body:", parsedBody);
+      return parsedBody; // ritorno l'array o oggetto già parsato
+    } catch (e) {
+      console.error("Errore parse di data.body:", e, data.body);
+      throw new Error("Body non valido");
+    }
+  }
+
+  return data;
+}
+
+// ================= UI: overlay di debug e rendering =================
+
 function showOverlay(todos) {
   let box = document.getElementById("todosOverlay");
   if (!box) {
@@ -33,104 +250,13 @@ function showOverlay(todos) {
     document.body.appendChild(box);
   }
   box.innerHTML = `<div style="font-weight:700;margin-bottom:6px">
-    TODOS (${todos.length}) – debug
-  </div>` + todos.map(t => {
+    TODOS (${Array.isArray(todos) ? todos.length : 0}) – debug
+  </div>` + (Array.isArray(todos) ? todos.map(t => {
     const title = t.title ?? t.text ?? t.name ?? t.Task ?? t.todo ?? t.TITLE ?? JSON.stringify(t);
     return `<div style="border:1px solid #777;border-radius:8px;padding:6px;margin:6px 0">${title}</div>`;
-  }).join("");
+  }).join("") : "<div>Nessuna todo</div>");
 }
 
-function parseHashForToken() {
-  const hash = window.location.hash.substring(1);
-  if (!hash) return;
-  const params = new URLSearchParams(hash);
-  const idToken = params.get("id_token");
-  if (idToken) {
-    sessionStorage.setItem("idToken", idToken);
-  }
-  history.replaceState(null, "", window.location.pathname);
-}
-
-function getIdToken() {
-  return sessionStorage.getItem("idToken");
-}
-
-function isLoggedIn() {
-  return !!getIdToken();
-}
-
-function login() {
-  window.location.href = LOGIN_URL;
-}
-
-function logout() {
-  sessionStorage.removeItem("idToken");
-  window.location.href = LOGOUT_URL;
-}
-
-// ========== API HELPERS ==========
-
-async function apiFetch(path, options = {}) {
-  const token = getIdToken();
-  if (!token) throw new Error("No token");
-
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {})
-  };
-
-  headers["Authorization"] = `Bearer ${token}`;
-  options.headers = headers;
-
-  const res = await fetch(API_BASE + path, options);
-
-  if (res.status === 401) {
-    console.error("401 dalla API, faccio logout");
-    logout();
-    throw new Error("Unauthorized");
-  }
-
-  const text = await res.text();
-  let data = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      console.error("Risposta non JSON:", text);
-      throw new Error("Risposta non valida");
-    }
-  }
-
-  // Qui data è { statusCode, body: "..." } oppure il body puro
-  if (data && typeof data === "object" && "body" in data) {
-    try {
-      const parsedBody = JSON.parse(data.body);
-      return parsedBody;      // <<< RITORNO DIRETTAMENTE L'ARRAY
-    } catch (e) {
-      console.error("Errore parse di data.body:", e, data.body);
-      throw new Error("Body non valido");
-    }
-  }
-
-  return data;
-}
-
-// ========== TODO LOGIC ==========
-async function loadTodos() {
-  try {
-    const raw = await apiFetch("/todos");
-    console.log("RAW /todos:", raw);
-
-    const todos = normalizeTodos(raw);
-    console.log("Todos normalizzati -> len:", Array.isArray(todos) ? todos.length : "no-array");
-
-    renderTodos(todos);
-    setMessage(`Renderizzate ${todos.length} task`, "success");
-  } catch (e) {
-    console.error("Errore in loadTodos:", e);
-    setMessage("Errore caricando le task.", "error");
-  }
-}
 function renderTodos(todos) {
   let list = document.getElementById("todoList");
   if (!list) {
@@ -149,7 +275,7 @@ function renderTodos(todos) {
     listStyle: "none"
   });
 
-  list.innerHTML = todos.map(t => {
+  list.innerHTML = (Array.isArray(todos) ? todos : []).map(t => {
     const title = t.title ?? t.text ?? t.name ?? t.Task ?? t.todo ?? t.TITLE ?? JSON.stringify(t);
     return `<li style="display:block;color:#fff;border:2px solid #fff;background:rgba(0,0,0,0.35);margin:8px 0;padding:8px 10px;border-radius:10px">
       ${String(title)}
@@ -159,14 +285,29 @@ function renderTodos(todos) {
   // overlay di sicurezza (così le vedi comunque)
   showOverlay(todos);
 
-  console.log("POST-RENDER li count:", list.querySelectorAll("li").length);
+  dbg("POST-RENDER li count:", list.querySelectorAll("li").length);
 }
 
+// ================= TODO LOGIC =================
 
+async function loadTodos() {
+  try {
+    const raw = await apiFetch("/todos");
+    dbg("RAW /todos:", raw);
 
+    const todos = normalizeTodos(raw);
+    dbg("Todos normalizzati -> len:", Array.isArray(todos) ? todos.length : "no-array", todos);
 
-async function addTodo() {
-  console.log("addTodo cliccato");
+    renderTodos(todos);
+    setMessage(`Renderizzate ${Array.isArray(todos) ? todos.length : 0} task`, "success");
+  } catch (e) {
+    console.error("Errore in loadTodos:", e);
+    setMessage("Errore caricando le task.", "error");
+  }
+}
+
+async function addTodo() { //funziona
+  dbg("addTodo cliccato");
 
   const input = document.getElementById("newTodo");
   const messageBox = document.getElementById("messageBox");
@@ -188,7 +329,7 @@ async function addTodo() {
       body: JSON.stringify({ title })
     });
 
-    console.log("Todo creato:", created);
+    dbg("Todo creato:", created);
 
     input.value = "";
     if (messageBox) messageBox.textContent = "";
@@ -202,7 +343,7 @@ async function addTodo() {
 
 async function toggleDone(todo) {
   try {
-    await apiFetch("/todos/" + todo.id, {
+    await apiFetch("/todos/" + getTodoId(todo), {
       method: "PUT",
       body: JSON.stringify({ done: !todo.done })
     });
@@ -214,7 +355,7 @@ async function toggleDone(todo) {
 
 async function deleteTodo(todo) {
   try {
-    await apiFetch("/todos/" + todo.id, {
+    await apiFetch("/todos/" + getTodoId(todo), {
       method: "DELETE"
     });
     await loadTodos();
@@ -223,7 +364,11 @@ async function deleteTodo(todo) {
   }
 }
 
-// ========== UI ==========
+function getTodoId(t) {
+  return t.id ?? t.todoId ?? t.pk ?? t.ID ?? t.pk_id ?? t.uuid ?? null;
+}
+
+// ================= UI helpers =================
 
 function setMessage(text, type = "") {
   const box = document.getElementById("messageBox");
@@ -251,7 +396,8 @@ function updateUI() {
     loginBtn.style.display = "none";
     logoutBtn.style.display = "inline-block";
     userInfo.textContent = "Sei loggato";
-    loadTodos();                          // carica e renderizza le task
+    // carico le todo
+    loadTodos();
   } else {
     app.style.display = "none";
     authSection.style.display = "block";
@@ -261,9 +407,6 @@ function updateUI() {
   }
 }
 
-
-// ========== INIT ==========
-
 function scrollToAuth() {
   const authSection = document.getElementById("notLogged");
   if (authSection) {
@@ -271,8 +414,10 @@ function scrollToAuth() {
   }
 }
 
+// ================= INIT =================
+
 document.addEventListener("DOMContentLoaded", () => {
-  console.log("DOM pronto");
+  dbg("DOM pronto");
 
   parseHashForToken();
   updateUI();
@@ -294,7 +439,3 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
-function getTodoId(t) {
-  return t.id ?? t.todoId ?? t.pk ?? t.ID ?? t.pk_id ?? t.uuid;
-}
-
